@@ -35,7 +35,7 @@ UA = "AgencyCollector/2.0 (academic survey research, Metropolitan University Kar
 BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
 
 EMAIL_HEADERS = ["email", "company", "type", "sector", "city", "website", "source", "source_url",
-                 "date_found", "email_check", "taken", "notes"]
+                 "date_found", "email_check", "taken", "notes", "quality"]
 QUEUE_HEADERS = ["kind", "value", "source", "added", "status", "note", "depth", "found"]
 RUNS_HEADERS = ["time", "agent", "jobs_done", "new_emails", "duplicates", "bad_emails", "errors", "summary"]
 
@@ -61,6 +61,35 @@ NOT_BUSINESS = ("hospital", "clinic", "medical cent", "school", "college", "univ
                 "apartment", "residen", "heights", "towers", "homes", "housing", "hotel", "restaurant", "cafe",
                 "fitness", "gym", "salon", "beauty", "wedding", "banquet", "marquee", "church", "mosque", "masjid",
                 "press club", "club", "hostel", "pharmacy", "dental", "eye cent", "eye hosp", "maternity", "plaza")
+
+
+TRADE_BODY_RE = re.compile(r"(\bcci|cci\b|cci[0-9._]|chamber|association|assoc\b|council|federation|fpcci|tdap|"
+                           r"\.gov|ministry|pasha\.|aptma|@reap\.|pcfa@|phma|prgmea|simap|psgmea|\.edu|university|"
+                           r"wccis|wcci|gbcci|towelassociation)", re.I)
+HIGH_SOURCES = ("tdap", "pcfa", "towel", "reap", "aptma", "prgmea", "phma", "psgmea", "simap", "plgmea", "pfva",
+                "exhib", "exporter", "salt-exporters", "foodag", "brochure")
+EXPORT_WORDS = ("export", "international buyers", "worldwide", "global clients", "overseas", "shipping worldwide",
+                "fob", "incoterm", "our buyers in", "we supply to")
+
+
+def quality_of(email, company, source, source_url, page_text=""):
+    """high / medium / low / trade_body / remove - decides who the Sender emails first."""
+    e = (email or "").lower()
+    if "@" not in e:
+        return "remove"
+    local, d = e.split("@", 1)
+    if d in FREE_MAIL and (len(local) < 4 or local.isdigit()):
+        return "remove"
+    if TRADE_BODY_RE.search(e) or TRADE_BODY_RE.search(company or ""):
+        return "trade_body"
+    src = f"{source} {source_url}".lower()
+    if any(k in src for k in HIGH_SOURCES):
+        return "high"
+    if page_text and any(w in page_text.lower() for w in EXPORT_WORDS):
+        return "high"
+    if "fpcci" in src or "chamber" in src or "cci" in src or "company website" in src:
+        return "medium"
+    return "low"
 
 
 def not_business(name):
@@ -267,6 +296,9 @@ def clean_email(e):
     e = (e or "").strip().strip(".,;:'\"()<>").lower()
     if not EMAIL_RE.fullmatch(e) or any(j in e for j in JUNK) or len(e) > 80:
         return None
+    local, d = e.split("@", 1)
+    if d in FREE_MAIL and (len(local) < 4 or local.isdigit()):
+        return None   # broken piece of an email split across two lines in a PDF
     return e
 
 
@@ -390,13 +422,18 @@ class Collector:
 
     def cleanup(self):
         """Removes rows from the old map search (wrong Hyderabad, hospitals, schools...) and foreign domains."""
+        try:
+            if self.ws_emails.col_count < 13:
+                self.ws_emails.add_cols(13 - self.ws_emails.col_count)   # room for the quality column
+        except Exception:
+            pass
         allrows = self.ws_emails.get_all_values()
         if len(allrows) < 2:
             return
         keep = [allrows[0]]
         removed = old_maps = 0
         for r in allrows[1:]:
-            r = r + [""] * (12 - len(r))
+            r = r + [""] * (13 - len(r))
             d = r[0].split("@")[1] if "@" in r[0] else ""
             old_map = r[6] == "OpenStreetMap" and r[11] != "osm-v2"
             if old_map or d.endswith(FOREIGN_TLD) or not_business(r[1]):
@@ -404,7 +441,21 @@ class Collector:
                 old_maps += old_map
             else:
                 keep.append(r)
+        # give every row a quality label (old rows were saved before labels existed)
+        if not removed:
+            header = keep[0] + [""] * (13 - len(keep[0]))
+            missing = [i for i, r in enumerate(keep[1:], start=2) if not r[12:13] or not r[12]]
+            if header[12] != "quality" or missing:
+                labels = [["quality"]] + [[r[12] if len(r) > 12 and r[12] else
+                                           quality_of(r[0], r[1], r[6], r[7])] for r in keep[1:]]
+                self.ws_emails.update(labels, f"M1:M{len(labels)}", value_input_option="RAW")
+                log(f"Quality labels added to {len(missing)} rows")
+            return
         if removed:
+            for r in keep[1:]:
+                if len(r) < 13 or not r[12]:
+                    r[12:13] = [quality_of(r[0], r[1], r[6], r[7])]
+            keep[0] = (keep[0] + [""] * 13)[:12] + ["quality"]
             self.ws_emails.clear()
             self.ws_emails.update(keep, "A1", value_input_option="RAW")
             log(f"Cleanup: removed {removed} rows that were not Pakistani businesses")
@@ -454,7 +505,7 @@ class Collector:
 
     # ----- saving -----
     def save(self, email, company="", typ="exporter", sector="", city="", website="", source="", source_url="",
-             note=""):
+             note="", page_text=""):
         email = clean_email(email)
         if not email:
             return False
@@ -475,7 +526,8 @@ class Collector:
         self.known.add(email)
         self.per_domain[d] = self.per_domain.get(d, 0) + 1
         self.new_rows.append([email, (company or "")[:80], typ, (sector or "")[:40], (city or "")[:40],
-                              website, source[:80], source_url[:300], pk_now(), chk, "", note])
+                              website, source[:80], source_url[:300], pk_now(), chk, "", note,
+                              quality_of(email, company, source, source_url, page_text)])
         stats["new"] += 1
         log(f"  + {mask(email)}  ({company or 'unknown company'})")
         return True
@@ -574,7 +626,7 @@ class Collector:
         new = 0
         for e in sorted(own or emails, key=rank_email)[:PER_COMPANY]:
             new += self.save(e, company, "exporter", website=f"https://{here}", source="company website",
-                             source_url=page["url"])
+                             source_url=page["url"], page_text=" ".join(p["text"][:20000] for p in pages))
         return new, f"{new} new" if emails else "no email on site"
 
     # ----- SEARCHER -----

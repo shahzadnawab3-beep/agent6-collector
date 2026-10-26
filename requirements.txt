@@ -1,0 +1,6 @@
+requests==2.32.3
+beautifulsoup4==4.12.3
+pypdf==5.1.0
+dnspython==2.7.0
+gspread==6.1.4
+google-auth==2.37.0

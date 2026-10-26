@@ -1,0 +1,37 @@
+# COLLECTOR SOURCES - one web page or PDF per line.  Lines starting with # are notes.
+# "sitemap:" lines make the Collector read that website's whole site map and pick out lists and PDFs.
+# Add any good list you find (member list, exhibitor list, directory, PDF) on a new line. That's all.
+
+# --- Site maps of official and trade-body websites ---
+sitemap:https://tdap.gov.pk
+sitemap:https://hems.tdap.gov.pk
+sitemap:https://fpcci.org.pk
+sitemap:https://www.kcci.com.pk
+sitemap:https://www.lcci.com.pk
+sitemap:https://www.fcci.com.pk
+sitemap:https://www.scci.com.pk
+sitemap:https://www.reap.com.pk
+sitemap:https://aptma.org.pk
+sitemap:https://www.prgmea.org
+sitemap:https://www.phmaonline.com
+sitemap:https://www.pcfa.pk
+sitemap:https://towelassociation.com
+sitemap:https://pseb.org.pk
+sitemap:https://www.pasha.org.pk
+
+# --- Big member lists and exporter PDFs ---
+https://fpcci.org.pk/wp-content/uploads/2025/09/ECGB-2024-2026-Upd-05-09-2025.pdf
+https://fpcci.org.pk/wp-content/uploads/2023/11/Provisional-List-of-Nominees-of-the-Member-TBs-for-the-GB-and-EC-of-FPCCI-for-the-Year-2024-2025.pdf
+https://fpcci.org.pk/wp-content/uploads/2022/07/PAK-AUSTRALIA-BUSINESS-COUNCIL-2022.pdf
+http://www.pcfa.pk/PROVISIONAL%20LIST%20OF%20MEMBERS%202024-2026.pdf
+https://towelassociation.com/documents/18-FINAL_LIST_OF_VOTERS_T.M.A_N.C_MEMBERS_2020-2021-18-07-2020.pdf
+https://hems.tdap.gov.pk/wp-content/uploads/2023/01/Chemical2022.pdf
+https://hems.tdap.gov.pk/wp-content/uploads/2023/01/SafetyEQ2022.pdf
+https://hems.tdap.gov.pk/wp-content/uploads/2023/11/Minerals-2023.pdf
+https://tdap.gov.pk/wp-content/uploads/2022/01/Dry-Fruits.pdf
+https://tdap.gov.pk/wp-content/uploads/2022/08/Towel-Brochure-1.pdf
+https://tdap.gov.pk/wp-content/uploads/2024/05/Leather-Garments-Brochure.pdf
+https://tdap.gov.pk/wp-content/uploads/2024/05/Finished-Leather-Brochure.pdf
+https://tdap.gov.pk/wp-content/uploads/2022/10/Denim-brochures-2.pdf
+https://tdap.gov.pk/wp-content/uploads/2025/01/Updated-Cell-phones-1-1.pdf
+https://ehcs.tdap.gov.pk/wp-content/uploads/2023/11/Home-Appliances-Brochure-2-1-2.pdf

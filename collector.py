@@ -51,8 +51,12 @@ SKIP_SITES = ("facebook.", "twitter.", "x.com", "instagram.", "linkedin.", "yout
 DIRECTORY_SITES = ("alibaba.", "indiamart.", "tradeindia.", "exportersindia.", "made-in-china.", "kompass.",
                    "dnb.com", "zoominfo.", "opencorporates.", "bloomberg.", "crunchbase.", "brecorder.",
                    "dawn.com", "tribune.", "thenews.", "propakistani.", "app.com.pk")
-LISTING_WORDS = ("member", "directory", "exporter", "exhibitor", "list", "company", "companies", "page",
-                 "participant", "supplier", "manufacturer", "business", "category", "sector", "brochure", "pdf")
+LISTING_WORDS = ("member", "directory", "exporter", "exhib", "-dir", "dir-", "list-of", "listof", "participant", "supplier",
+                 "manufacturer", "brochure", "delegat", "company-list", "companies")
+NOT_LIST_WORDS = ("sro", "guidance", "unsc", "security-council", "-act-", "act-19", "act-20", "chapter-", "policy",
+                  "circular", "notification", "tender", "notice", "advert", "career", "job", "budget",
+                  "annual-report", "procurement", "rules", "ordinance", "gazette", "minutes", "agenda", "news",
+                  "press-release", "event", "blog", "privacy", "terms", "login", "cart", "tag/", "author/")
 CONTACT_WORDS = ("contact", "about", "reach", "enquir", "inquir", "get-in-touch", "team", "office")
 GOOD_PREFIX = ("export", "sales", "info", "contact", "marketing", "trade", "business", "ceo", "md", "director",
                "office", "admin", "mail")
@@ -80,6 +84,10 @@ def quality_of(email, company, source, source_url, page_text=""):
     local, d = e.split("@", 1)
     if d in FREE_MAIL and (len(local) < 4 or local.isdigit()):
         return "remove"
+    if bad_domain(d) or "india" in local or d.endswith(FOREIGN_TLD):
+        return "remove"
+    if "company website" in (source or "").lower() and bad_domain(domain_of(source_url or "")):
+        return "remove"
     if TRADE_BODY_RE.search(e) or TRADE_BODY_RE.search(company or ""):
         return "trade_body"
     src = f"{source} {source_url}".lower()
@@ -90,6 +98,21 @@ def quality_of(email, company, source, source_url, page_text=""):
     if "fpcci" in src or "chamber" in src or "cci" in src or "company website" in src:
         return "medium"
     return "low"
+
+
+def looks_like_list(url):
+    low = url.lower()
+    return any(w in low for w in LISTING_WORDS) and not any(w in low for w in NOT_LIST_WORDS)
+
+
+BAD_DOMAINS = ("un.org", "worldbank.org", "imf.org", "wto.org", "europa.eu", "who.int", "ilo.org", "adb.org",
+               "bankofamerica.com", "pbs.gov.pk")
+
+
+def bad_domain(d):
+    d = d.lower()
+    return d.endswith((".gov", ".int", ".gov.pk", ".edu", ".edu.pk", ".mil")) or any(d == b or d.endswith("." + b)
+                                                                                    for b in BAD_DOMAINS)
 
 
 def not_business(name):
@@ -402,6 +425,10 @@ class Collector:
         self.cleanup()
         rows = self.ws_emails.get_all_values()[1:]
         self.known = {r[0].strip().lower() for r in rows if r and r[0]}
+        try:   # emails moved to 'removed' are never collected again
+            self.known |= {r[0].strip().lower() for r in sh.worksheet("removed").get_all_values()[1:] if r and r[0]}
+        except Exception:
+            pass
         self.per_domain = {}
         for e in self.known:
             d = e.split("@")[1] if "@" in e else ""
@@ -421,7 +448,8 @@ class Collector:
         log(f"Start: {len(self.known)} emails in the sheet, {len(self.queue) - 1} jobs in the queue")
 
     def cleanup(self):
-        """Removes rows from the old map search (wrong Hyderabad, hospitals, schools...) and foreign domains."""
+        """Every run: moves unrelated emails (broken, UN/government, foreign, hospitals, schools...) out of the
+        'emails' tab into the 'removed' tab, and gives every remaining row a quality label."""
         try:
             if self.ws_emails.col_count < 13:
                 self.ws_emails.add_cols(13 - self.ws_emails.col_count)   # room for the quality column
@@ -430,37 +458,37 @@ class Collector:
         allrows = self.ws_emails.get_all_values()
         if len(allrows) < 2:
             return
-        keep = [allrows[0]]
-        removed = old_maps = 0
+        header = (allrows[0] + [""] * 13)[:12] + ["quality"]
+        keep, gone, old_maps, relabel = [header], [], 0, False
         for r in allrows[1:]:
-            r = r + [""] * (13 - len(r))
+            r = (r + [""] * 13)[:13]
+            if not r[0]:
+                continue
             d = r[0].split("@")[1] if "@" in r[0] else ""
             old_map = r[6] == "OpenStreetMap" and r[11] != "osm-v2"
-            if old_map or d.endswith(FOREIGN_TLD) or not_business(r[1]):
-                removed += 1
+            q = quality_of(r[0], r[1], r[6], r[7])
+            unrelated = old_map or d.endswith(FOREIGN_TLD) or not_business(r[1]) or q == "remove"
+            if unrelated and not r[10]:          # never move emails the Sender already took
+                gone.append(r[:12] + ["remove"])
                 old_maps += old_map
-            else:
-                keep.append(r)
-        # give every row a quality label (old rows were saved before labels existed)
-        if not removed:
-            header = keep[0] + [""] * (13 - len(keep[0]))
-            missing = [i for i, r in enumerate(keep[1:], start=2) if not r[12:13] or not r[12]]
-            if header[12] != "quality" or missing:
-                labels = [["quality"]] + [[r[12] if len(r) > 12 and r[12] else
-                                           quality_of(r[0], r[1], r[6], r[7])] for r in keep[1:]]
-                self.ws_emails.update(labels, f"M1:M{len(labels)}", value_input_option="RAW")
-                log(f"Quality labels added to {len(missing)} rows")
-            return
-        if removed:
-            for r in keep[1:]:
-                if len(r) < 13 or not r[12]:
-                    r[12:13] = [quality_of(r[0], r[1], r[6], r[7])]
-            keep[0] = (keep[0] + [""] * 13)[:12] + ["quality"]
+                continue
+            if r[12] != q and (not r[12] or q in ("remove", "trade_body")):
+                r[12] = q
+                relabel = True
+            keep.append(r)
+        if gone:
+            try:
+                ws_removed = self.ws_emails.spreadsheet.worksheet("removed")
+            except Exception:
+                ws_removed = get_tab(self.ws_emails.spreadsheet, "removed", header)
+            ws_removed.append_rows(gone, value_input_option="RAW")
             self.ws_emails.clear()
             self.ws_emails.update(keep, "A1", value_input_option="RAW")
-            log(f"Cleanup: removed {removed} rows that were not Pakistani businesses")
-            if not old_maps:
-                return
+            log(f"Cleanup: moved {len(gone)} unrelated emails to the 'removed' tab; {len(keep) - 1} remain")
+        elif relabel or allrows[0][12:13] != ["quality"]:
+            self.ws_emails.update([[r[12]] for r in keep], f"M1:M{len(keep)}", value_input_option="RAW")
+            log("Quality labels updated")
+        if old_maps:
             q = self.ws_queue.get_all_values()
             ups = [{"range": f"E{i + 1}:H{i + 1}", "values": [["pending", "redo with Pakistan-only map", "0", ""]]}
                    for i, r in enumerate(q) if i > 0 and r and r[0] == "osm" and (len(r) < 5 or r[4] != "pending")]
@@ -476,7 +504,8 @@ class Collector:
             d = domain_of(v)
             if not d or any(s in d for s in SKIP_SITES):
                 return False
-            if kind == "site" and (any(s in d for s in DIRECTORY_SITES) or self.per_domain.get(d, 0) >= PER_COMPANY):
+            if kind == "site" and (any(s in d for s in DIRECTORY_SITES) or self.per_domain.get(d, 0) >= PER_COMPANY
+                                   or bad_domain(d) or d.endswith(FOREIGN_TLD)):
                 return False
         self.qvalues.add(v.lower())
         self.new_jobs.append([kind, v, source[:120], pk_now(), "pending", "", str(depth), ""])
@@ -513,7 +542,7 @@ class Collector:
             stats["dups"] += 1
             return False
         d = email.split("@")[1]
-        if d.endswith(FOREIGN_TLD) or not_business(company):
+        if d.endswith(FOREIGN_TLD) or not_business(company) or bad_domain(d) or "india" in email.split("@")[0]:
             return False
         if d not in FREE_MAIL and self.per_domain.get(d, 0) >= PER_COMPANY:
             return False
@@ -561,6 +590,7 @@ class Collector:
 
     def _queue_links(self, links, base, depth, from_sitemap=False):
         here = domain_of(base)
+        base_is_list = looks_like_list(base) or depth == 0
         added_pages = added_sites = 0
         for l in links[:600]:
             if not l.startswith("http"):
@@ -568,10 +598,11 @@ class Collector:
             d = domain_of(l)
             low = l.lower()
             if d == here:
-                useful = low.endswith(".pdf") or low.endswith(".xml") or any(w in low for w in LISTING_WORDS)
+                useful = looks_like_list(l) or (low.endswith(".xml") and "sitemap" in low)
                 if useful and added_pages < 40:
                     added_pages += self.add_job("url", l.split("#")[0], f"inside {here}", depth + 1)
-            elif not from_sitemap and d and added_sites < 40:
+            elif (not from_sitemap and d and added_sites < 40 and base_is_list and not bad_domain(d)
+                  and not d.endswith(FOREIGN_TLD) and not d.endswith(here)):
                 added_sites += self.add_job("site", f"https://{d}", base, depth + 1)
         return f"{added_pages} pages + {added_sites} company sites queued"
 
@@ -589,7 +620,7 @@ class Collector:
                     low = l.lower()
                     if low.endswith(".xml"):
                         total += self.add_job("sitemap-part", l, f"sitemap of {domain_of(base)}")
-                    elif low.endswith(".pdf") or any(w in low for w in LISTING_WORDS):
+                    elif looks_like_list(l):
                         total += self.add_job("url", l, f"sitemap of {domain_of(base)}", 1)
                 break
         return 0, f"{total} pages found in site map"
@@ -599,7 +630,7 @@ class Collector:
         n = 0
         for l in (p["links"] if p else [])[:1500]:
             low = l.lower()
-            if low.endswith(".pdf") or any(w in low for w in LISTING_WORDS):
+            if looks_like_list(l):
                 n += self.add_job("url", l, source, 1)
         return 0, f"{n} pages queued"
 
@@ -643,9 +674,11 @@ class Collector:
             low = l.lower()
             if any(s in d for s in SKIP_SITES):
                 continue
-            if low.endswith(".pdf") or any(w in low for w in LISTING_WORDS) or "plan: trade" in source:
+            if bad_domain(d) and not looks_like_list(l):
+                continue
+            if looks_like_list(l) or (low.endswith(".pdf") and not any(w in low for w in NOT_LIST_WORDS)):
                 lists += self.add_job("url", l, f"search: {query[:60]}", 0)
-            elif not any(s in d for s in DIRECTORY_SITES):
+            elif not any(s in d for s in DIRECTORY_SITES) and not d.endswith(FOREIGN_TLD):
                 sites += self.add_job("site", f"https://{d}", f"search: {query[:60]}", 1)
         return new, f"{new} new from results, {lists} lists + {sites} sites queued"
 
@@ -746,6 +779,12 @@ out tags;"""
                 break
             kind, value, source = r[0], r[1], r[2]
             d = domain_of(value)
+            useless = (kind == "site" and (bad_domain(d) or d.endswith(FOREIGN_TLD))) or \
+                      (kind == "url" and r[2] != "sources.txt" and not looks_like_list(value)
+                       and not value.lower().endswith(".xml"))
+            if useless:
+                self.updates.append({"range": f"E{row_no}:H{row_no}", "values": [["skipped", "not a list / not a company", r[6], "0"]]})
+                continue
             if kind in ("url", "site") and self.dom_jobs.get(d, 0) >= 4 and self.dom_found.get(d, 0) == 0:
                 self.updates.append({"range": f"E{row_no}:H{row_no}", "values": [["skipped", "website gave nothing before", r[6], "0"]]})
                 continue

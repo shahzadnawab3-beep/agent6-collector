@@ -56,6 +56,18 @@ LISTING_WORDS = ("member", "directory", "exporter", "exhibitor", "list", "compan
 CONTACT_WORDS = ("contact", "about", "reach", "enquir", "inquir", "get-in-touch", "team", "office")
 GOOD_PREFIX = ("export", "sales", "info", "contact", "marketing", "trade", "business", "ceo", "md", "director",
                "office", "admin", "mail")
+FOREIGN_TLD = (".in", ".bd", ".lk", ".np", ".ir", ".af")
+NOT_BUSINESS = ("hospital", "clinic", "medical cent", "school", "college", "university", "academy", "institute of",
+                "apartment", "residen", "heights", "towers", "homes", "housing", "hotel", "restaurant", "cafe",
+                "fitness", "gym", "salon", "beauty", "wedding", "banquet", "marquee", "church", "mosque", "masjid",
+                "press club", "club", "hostel", "pharmacy", "dental", "eye cent", "eye hosp", "maternity", "plaza")
+
+
+def not_business(name):
+    n = (name or "").lower()
+    return any(w in n for w in NOT_BUSINESS)
+
+
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,10}")
 
 SECTORS = ["rice", "textile", "garments", "towel", "bedsheet", "denim", "knitwear", "hosiery", "leather",
@@ -355,6 +367,7 @@ class Collector:
         self.ws_emails = get_tab(sh, "emails", EMAIL_HEADERS)
         self.ws_queue = get_tab(sh, "queue", QUEUE_HEADERS)
         self.ws_runs = get_tab(sh, "runs", RUNS_HEADERS)
+        self.cleanup()
         rows = self.ws_emails.get_all_values()[1:]
         self.known = {r[0].strip().lower() for r in rows if r and r[0]}
         self.per_domain = {}
@@ -374,6 +387,34 @@ class Collector:
                 self.dom_jobs[d] = self.dom_jobs.get(d, 0) + 1
                 self.dom_found[d] = self.dom_found.get(d, 0) + (int(r[7]) if r[7].isdigit() else 0)
         log(f"Start: {len(self.known)} emails in the sheet, {len(self.queue) - 1} jobs in the queue")
+
+    def cleanup(self):
+        """Removes rows from the old map search (wrong Hyderabad, hospitals, schools...) and foreign domains."""
+        allrows = self.ws_emails.get_all_values()
+        if len(allrows) < 2:
+            return
+        keep = [allrows[0]]
+        removed = old_maps = 0
+        for r in allrows[1:]:
+            r = r + [""] * (12 - len(r))
+            d = r[0].split("@")[1] if "@" in r[0] else ""
+            old_map = r[6] == "OpenStreetMap" and r[11] != "osm-v2"
+            if old_map or d.endswith(FOREIGN_TLD) or not_business(r[1]):
+                removed += 1
+                old_maps += old_map
+            else:
+                keep.append(r)
+        if removed:
+            self.ws_emails.clear()
+            self.ws_emails.update(keep, "A1", value_input_option="RAW")
+            log(f"Cleanup: removed {removed} rows that were not Pakistani businesses")
+            if not old_maps:
+                return
+            q = self.ws_queue.get_all_values()
+            ups = [{"range": f"E{i + 1}:H{i + 1}", "values": [["pending", "redo with Pakistan-only map", "0", ""]]}
+                   for i, r in enumerate(q) if i > 0 and r and r[0] == "osm" and (len(r) < 5 or r[4] != "pending")]
+            if ups:
+                self.ws_queue.batch_update(ups)
 
     # ----- queue -----
     def add_job(self, kind, value, source, depth=0):
@@ -421,6 +462,8 @@ class Collector:
             stats["dups"] += 1
             return False
         d = email.split("@")[1]
+        if d.endswith(FOREIGN_TLD) or not_business(company):
+            return False
         if d not in FREE_MAIL and self.per_domain.get(d, 0) >= PER_COMPANY:
             return False
         chk = check_email(email)
@@ -567,17 +610,16 @@ class Collector:
 
     # ----- MAPPER (OpenStreetMap) -----
     def do_osm(self, city, source):
-        q = f"""[out:json][timeout:90];
+        q = f"""[out:json][timeout:120];
+area["ISO3166-1"="PK"][admin_level=2]->.pk;
 area[~"^name(:en)?$"~"^{city}$"]["boundary"="administrative"]->.a;
 (
-  nwr(area.a)["email"];
-  nwr(area.a)["contact:email"];
-  nwr(area.a)["website"]["office"];
-  nwr(area.a)["website"]["industrial"];
-  nwr(area.a)["website"]["man_made"="works"];
-  nwr(area.a)["website"]["craft"];
-  nwr(area.a)["website"]["shop"="wholesale"];
-  nwr(area.a)["contact:website"]["office"];
+  nwr(area.a)(area.pk)["office"~"company|industrial|association|logistics|export|import|it"][~"^(contact:)?(email|website)$"~"."];
+  nwr(area.a)(area.pk)["industrial"][~"^(contact:)?(email|website)$"~"."];
+  nwr(area.a)(area.pk)["man_made"="works"][~"^(contact:)?(email|website)$"~"."];
+  nwr(area.a)(area.pk)["craft"][~"^(contact:)?(email|website)$"~"."];
+  nwr(area.a)(area.pk)["shop"="wholesale"][~"^(contact:)?(email|website)$"~"."];
+  nwr(area.a)(area.pk)["landuse"="industrial"]["name"][~"^(contact:)?(email|website)$"~"."];
 );
 out tags;"""
         r = None
@@ -594,12 +636,14 @@ out tags;"""
         for el in r.json().get("elements", []):
             t = el.get("tags", {})
             name = t.get("name:en") or t.get("name", "")
+            if not_business(name):
+                continue
             web = t.get("website") or t.get("contact:website") or ""
             for key in ("email", "contact:email"):
                 for e in re.split(r"[;,\s]+", t.get(key, "")):
                     if e:
                         new += self.save(e, name, "company", t.get("industrial", t.get("office", "")), city, web,
-                                         "OpenStreetMap", f"osm:{el.get('type')}/{el.get('id')}")
+                                         "OpenStreetMap", f"osm:{el.get('type')}/{el.get('id')}", note="osm-v2")
             if web:
                 sites += self.add_job("site", web, f"OpenStreetMap {city}", 1)
         return new, f"{new} new, {sites} company sites queued"

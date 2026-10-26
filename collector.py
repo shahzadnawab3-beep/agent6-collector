@@ -437,6 +437,7 @@ class Collector:
         self.qvalues = {r[1].strip().lower() for r in self.queue[1:] if len(r) > 1}
         self.new_rows, self.new_jobs, self.updates = [], [], []
         self.last_flush = time.time()
+        self.known_sites_bad = set()
         # SCORER: how useful each website has been so far
         self.dom_jobs, self.dom_found = {}, {}
         for r in self.queue[1:]:
@@ -460,6 +461,8 @@ class Collector:
             return
         header = (allrows[0] + [""] * 13)[:12] + ["quality"]
         keep, gone, old_maps, relabel = [header], [], 0, False
+        old_map_sites = {domain_of(r[1]) for r in self.ws_queue.get_all_values()[1:]
+                         if len(r) > 2 and r[0] == "site" and r[2].startswith("OpenStreetMap ")}
         for r in allrows[1:]:
             r = (r + [""] * 13)[:13]
             if not r[0]:
@@ -467,7 +470,8 @@ class Collector:
             d = r[0].split("@")[1] if "@" in r[0] else ""
             old_map = r[6] == "OpenStreetMap" and r[11] != "osm-v2"
             q = quality_of(r[0], r[1], r[6], r[7])
-            unrelated = old_map or d.endswith(FOREIGN_TLD) or not_business(r[1]) or q == "remove"
+            from_old_map = r[6] == "company website" and domain_of(r[5] or r[7]) in old_map_sites
+            unrelated = old_map or from_old_map or d.endswith(FOREIGN_TLD) or not_business(r[1]) or q == "remove"
             if unrelated and not r[10]:          # never move emails the Sender already took
                 gone.append(r[:12] + ["remove"])
                 old_maps += old_map
@@ -652,6 +656,10 @@ class Collector:
         emails = set()
         for p in pages:
             emails |= find_emails(p["text"], p["links"])
+        alltext = " ".join(p["text"][:30000] for p in pages)
+        if not here.endswith(".pk") and not re.search(r"pakistan|karachi|lahore|faisalabad|sialkot|\+92|0092", alltext, re.I):
+            self.known_sites_bad.add(here)
+            return 0, "not a Pakistani company website"
         own = [e for e in emails if e.split("@")[1].endswith(here) or e.split("@")[1] in FREE_MAIL]
         company = re.split(r"\s[|\-–]\s", page["title"])[0][:80] if page["title"] else ""
         new = 0
@@ -730,7 +738,7 @@ out tags;"""
                         new += self.save(e, name, "company", t.get("industrial", t.get("office", "")), city, web,
                                          "OpenStreetMap", f"osm:{el.get('type')}/{el.get('id')}", note="osm-v2")
             if web:
-                sites += self.add_job("site", web, f"OpenStreetMap {city}", 1)
+                sites += self.add_job("site", web, f"Map-PK {city}", 1)
         return new, f"{new} new, {sites} company sites queued"
 
     # ----- one shift -----
@@ -779,7 +787,8 @@ out tags;"""
                 break
             kind, value, source = r[0], r[1], r[2]
             d = domain_of(value)
-            useless = (kind == "site" and (bad_domain(d) or d.endswith(FOREIGN_TLD))) or \
+            useless = (kind == "site" and (bad_domain(d) or d.endswith(FOREIGN_TLD) or
+                                           r[2].startswith("OpenStreetMap "))) or \
                       (kind == "url" and r[2] != "sources.txt" and not looks_like_list(value)
                        and not value.lower().endswith(".xml"))
             if useless:
